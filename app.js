@@ -180,7 +180,7 @@ const LocationIcon = () => (
   </svg>
 );
 
-// MapView Component using pure Leaflet
+// MapView Component using Mapbox GL JS
 const MapView = () => {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -188,95 +188,391 @@ const MapView = () => {
 
   useEffect(() => {
     if (mapRef.current && !mapInstanceRef.current) {
-      // Initialize Leaflet map
-      const map = L.map(mapRef.current).setView(appData.defaultMapCenter, appData.defaultMapZoom);
+      // Initialize Mapbox map
+      mapboxgl.accessToken = 'pk.eyJ1IjoianNodWJoaWkiLCJhIjoiY21pZnJiOWYxMDBiZDNjc2Rydmg3NHY1ayJ9.gdiQ_hSrrjMVMGHhqh1aNw';
       
-      // Add dark-themed tiles
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-      }).addTo(map);
+      const map = new mapboxgl.Map({
+        container: mapRef.current,
+        style: 'mapbox://styles/mapbox/satellite-streets-v12', // Satellite view with streets
+        center: [appData.defaultMapCenter[1], appData.defaultMapCenter[0]], // [lng, lat]
+        zoom: appData.defaultMapZoom - 1,
+        pitch: 45, // Add 3D tilt
+        bearing: 0,
+        antialias: true // Smooth edges
+      });
+      
+      // Add navigation controls (zoom, rotation)
+      map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+      
+      // Add geolocate control for current location
+      const geolocateControl = new mapboxgl.GeolocateControl({
+        positionOptions: {
+          enableHighAccuracy: true
+        },
+        trackUserLocation: true,
+        showUserHeading: true,
+        showAccuracyCircle: true
+      });
+      map.addControl(geolocateControl, 'top-left');
+      
+      // Add scale control
+      map.addControl(new mapboxgl.ScaleControl({
+        maxWidth: 100,
+        unit: 'metric'
+      }), 'bottom-left');
+      
+      // Add terrain for 3D effect
+      map.on('load', () => {
+        map.addSource('mapbox-dem', {
+          type: 'raster-dem',
+          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+          tileSize: 512,
+          maxzoom: 14
+        });
+        map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.5 });
+        
+        // Add sky layer for better visibility
+        map.addLayer({
+          id: 'sky',
+          type: 'sky',
+          paint: {
+            'sky-type': 'atmosphere',
+            'sky-atmosphere-sun': [0.0, 90.0],
+            'sky-atmosphere-sun-intensity': 15
+          }
+        });
+      });
       
       mapInstanceRef.current = map;
 
       // Add hazard zones with detailed popups
-      appData.hazardZones.forEach(zone => {
-        const circle = L.circle(zone.center, {
-          radius: zone.radius,
-          color: zone.color,
-          fillColor: zone.color,
-          fillOpacity: 0.2,
-          weight: 2
-        }).addTo(map);
-        
-        // Simplified popup content that works better with Leaflet
-        const popupContent = `<h3 style="color: #e2e8f0; font-weight: bold; margin-bottom: 8px;">${zone.name}</h3><p style="color: #e2e8f0; margin-bottom: 8px;">${zone.description}</p><div style="margin-top: 8px;"><strong style="color: #e2e8f0;">Safety Tips:</strong><br><span style="color: #e2e8f0; font-size: 12px;">${zone.safetyTips}</span></div>`;
-        
-        circle.bindPopup(popupContent, {
-          maxWidth: 300,
-          className: 'custom-popup'
+      map.on('load', () => {
+        appData.hazardZones.forEach((zone, index) => {
+          // Add circle layer for each zone
+          map.addSource(`zone-${zone.id}`, {
+            type: 'geojson',
+            data: {
+              type: 'Feature',
+              geometry: {
+                type: 'Point',
+                coordinates: [zone.center[1], zone.center[0]] // [lng, lat]
+              }
+            }
+          });
+          
+          map.addLayer({
+            id: `zone-circle-${zone.id}`,
+            type: 'circle',
+            source: `zone-${zone.id}`,
+            paint: {
+              'circle-radius': {
+                stops: [
+                  [0, 0],
+                  [20, zone.radius / 20]
+                ],
+                base: 2
+              },
+              'circle-color': zone.color,
+              'circle-opacity': 0.2,
+              'circle-stroke-width': 2,
+              'circle-stroke-color': zone.color
+            }
+          });
+          
+          // Add popup on click
+          map.on('click', `zone-circle-${zone.id}`, () => {
+            const popupContent = `<h3 style="color: #e2e8f0; font-weight: bold; margin-bottom: 8px;">${zone.name}</h3><p style="color: #e2e8f0; margin-bottom: 8px;">${zone.description}</p><div style="margin-top: 8px;"><strong style="color: #e2e8f0;">Safety Tips:</strong><br><span style="color: #e2e8f0; font-size: 12px;">${zone.safetyTips}</span></div>`;
+            
+            new mapboxgl.Popup({ className: 'custom-popup' })
+              .setLngLat([zone.center[1], zone.center[0]])
+              .setHTML(popupContent)
+              .addTo(map);
+          });
+          
+          // Change cursor on hover
+          map.on('mouseenter', `zone-circle-${zone.id}`, () => {
+            map.getCanvas().style.cursor = 'pointer';
+          });
+          map.on('mouseleave', `zone-circle-${zone.id}`, () => {
+            map.getCanvas().style.cursor = '';
+          });
         });
       });
 
       // Add hospital markers
-      appData.hospitals.forEach(hospital => {
-        L.marker(hospital.coordinates)
-          .addTo(map)
-          .bindPopup(`<h3 style="color: #e2e8f0; font-weight: bold;">🏥 ${hospital.name}</h3><p style="color: #e2e8f0;">Contact: ${hospital.contact}</p>`, {
-            className: 'custom-popup'
+      map.on('load', () => {
+        appData.hospitals.forEach(hospital => {
+          const el = document.createElement('div');
+          el.className = 'hospital-marker';
+          el.innerHTML = '🏥';
+          el.style.fontSize = '24px';
+          el.style.cursor = 'pointer';
+          
+          const marker = new mapboxgl.Marker(el)
+            .setLngLat([hospital.coordinates[1], hospital.coordinates[0]])
+            .addTo(map);
+          
+          el.addEventListener('click', () => {
+            new mapboxgl.Popup({ className: 'custom-popup' })
+              .setLngLat([hospital.coordinates[1], hospital.coordinates[0]])
+              .setHTML(`<h3 style="color: #e2e8f0; font-weight: bold;">🏥 ${hospital.name}</h3><p style="color: #e2e8f0;">Contact: ${hospital.contact}</p>`)
+              .addTo(map);
           });
+        });
       });
 
       // Add shelter markers
-      appData.shelters.forEach(shelter => {
-        L.marker(shelter.coordinates)
-          .addTo(map)
-          .bindPopup(`<h3 style="color: #e2e8f0; font-weight: bold;">🏠 ${shelter.name}</h3><p style="color: #e2e8f0;">Capacity: ${shelter.capacity} people</p>`, {
-            className: 'custom-popup'
+      map.on('load', () => {
+        appData.shelters.forEach(shelter => {
+          const el = document.createElement('div');
+          el.className = 'shelter-marker';
+          el.innerHTML = '🏠';
+          el.style.fontSize = '24px';
+          el.style.cursor = 'pointer';
+          
+          const marker = new mapboxgl.Marker(el)
+            .setLngLat([shelter.coordinates[1], shelter.coordinates[0]])
+            .addTo(map);
+          
+          el.addEventListener('click', () => {
+            new mapboxgl.Popup({ className: 'custom-popup' })
+              .setLngLat([shelter.coordinates[1], shelter.coordinates[0]])
+              .setHTML(`<h3 style="color: #e2e8f0; font-weight: bold;">🏠 ${shelter.name}</h3><p style="color: #e2e8f0;">Capacity: ${shelter.capacity} people</p>`)
+              .addTo(map);
           });
+        });
       });
 
-      // Get user location
+      // Get user location with custom ring structure
+      const createUserLocationMarker = (coordinates) => {
+        // Create custom user marker with rings
+        const el = document.createElement('div');
+        el.className = 'user-location-container';
+        el.innerHTML = `
+          <div class="user-location-ring-outer"></div>
+          <div class="user-location-ring-inner"></div>
+          <div class="user-location-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+              <circle cx="12" cy="10" r="3"/>
+            </svg>
+          </div>
+        `;
+        el.style.cssText = `
+          width: 200px;
+          height: 200px;
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+        `;
+        
+        // Style outer yellow ring
+        const outerRing = el.querySelector('.user-location-ring-outer');
+        outerRing.style.cssText = `
+          position: absolute;
+          width: 200px;
+          height: 200px;
+          border: 4px solid #f59e0b;
+          border-radius: 50%;
+          background: rgba(245, 158, 11, 0.15);
+          animation: pulse-outer 2s ease-in-out infinite;
+        `;
+        
+        // Style inner red ring
+        const innerRing = el.querySelector('.user-location-ring-inner');
+        innerRing.style.cssText = `
+          position: absolute;
+          width: 120px;
+          height: 120px;
+          border: 4px solid #ef4444;
+          border-radius: 50%;
+          background: rgba(239, 68, 68, 0.2);
+          animation: pulse-inner 2s ease-in-out infinite 0.5s;
+        `;
+        
+        // Style center location icon
+        const centerIcon = el.querySelector('.user-location-icon');
+        centerIcon.style.cssText = `
+          position: absolute;
+          width: 50px;
+          height: 50px;
+          background: #22d3ee;
+          border: 4px solid white;
+          border-radius: 50%;
+          box-shadow: 0 0 20px rgba(34, 211, 238, 0.8), 0 0 40px rgba(34, 211, 238, 0.4);
+          z-index: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        `;
+        
+        return el;
+      };
+      
+      // Add animations to document
+      if (!document.getElementById('user-location-animations')) {
+        const style = document.createElement('style');
+        style.id = 'user-location-animations';
+        style.innerHTML = `
+          @keyframes pulse-outer {
+            0%, 100% {
+              transform: scale(1);
+              opacity: 0.8;
+            }
+            50% {
+              transform: scale(1.08);
+              opacity: 0.4;
+            }
+          }
+          @keyframes pulse-inner {
+            0%, 100% {
+              transform: scale(1);
+              opacity: 0.9;
+            }
+            50% {
+              transform: scale(1.12);
+              opacity: 0.5;
+            }
+          }
+        `;
+        document.head.appendChild(style);
+      }
+      
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           (position) => {
             const userPos = [position.coords.latitude, position.coords.longitude];
             setUserPosition(userPos);
             
-            // Create custom user marker
-            const userIcon = L.divIcon({
-              html: '<div class="user-location-marker"></div>',
-              className: 'custom-div-icon',
-              iconSize: [20, 20],
-              iconAnchor: [10, 10]
+            const el = createUserLocationMarker(userPos);
+            const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+              .setLngLat([userPos[1], userPos[0]])
+              .addTo(map);
+            
+            // Create popup with severity info
+            const popup = new mapboxgl.Popup({ 
+              offset: 25,
+              className: 'custom-popup',
+              closeButton: false
+            })
+              .setHTML(`
+                <div style="padding: 8px;">
+                  <h3 style="color: #e2e8f0; font-weight: bold; margin-bottom: 8px; font-size: 16px;">📍 Your Location</h3>
+                  <div style="margin-bottom: 6px;">
+                    <strong style="color: #f59e0b;">⚠️ Caution Zone:</strong>
+                    <span style="color: #e2e8f0; font-size: 13px;"> 100m radius</span>
+                  </div>
+                  <div style="margin-bottom: 6px;">
+                    <strong style="color: #ef4444;">🚨 High Risk Zone:</strong>
+                    <span style="color: #e2e8f0; font-size: 13px;"> 60m radius</span>
+                  </div>
+                  <p style="color: #94a3b8; font-size: 12px; margin-top: 8px; margin-bottom: 0;">
+                    Stay alert and monitor active warnings
+                  </p>
+                </div>
+              `);
+            
+            // Show popup on hover
+            el.addEventListener('mouseenter', () => {
+              popup.addTo(map);
+              marker.setPopup(popup);
+              popup.addTo(map);
             });
             
-            L.marker(userPos, { icon: userIcon }).addTo(map);
+            // Show popup on click
+            el.addEventListener('click', () => {
+              popup.addTo(map);
+              marker.setPopup(popup);
+              popup.addTo(map);
+            });
           },
           (error) => {
             console.error('Geolocation error:', error);
             setUserPosition(appData.defaultMapCenter);
             
-            const userIcon = L.divIcon({
-              html: '<div class="user-location-marker"></div>',
-              className: 'custom-div-icon',
-              iconSize: [20, 20],
-              iconAnchor: [10, 10]
+            const el = createUserLocationMarker(appData.defaultMapCenter);
+            const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+              .setLngLat([appData.defaultMapCenter[1], appData.defaultMapCenter[0]])
+              .addTo(map);
+            
+            const popup = new mapboxgl.Popup({ 
+              offset: 25,
+              className: 'custom-popup',
+              closeButton: false
+            })
+              .setHTML(`
+                <div style="padding: 8px;">
+                  <h3 style="color: #e2e8f0; font-weight: bold; margin-bottom: 8px; font-size: 16px;">📍 Default Location</h3>
+                  <div style="margin-bottom: 6px;">
+                    <strong style="color: #f59e0b;">⚠️ Caution Zone:</strong>
+                    <span style="color: #e2e8f0; font-size: 13px;"> 100m radius</span>
+                  </div>
+                  <div style="margin-bottom: 6px;">
+                    <strong style="color: #ef4444;">🚨 High Risk Zone:</strong>
+                    <span style="color: #e2e8f0; font-size: 13px;"> 60m radius</span>
+                  </div>
+                  <p style="color: #94a3b8; font-size: 12px; margin-top: 8px; margin-bottom: 0;">
+                    Location access denied
+                  </p>
+                </div>
+              `);
+            
+            el.addEventListener('mouseenter', () => {
+              popup.addTo(map);
+              marker.setPopup(popup);
+              popup.addTo(map);
             });
             
-            L.marker(appData.defaultMapCenter, { icon: userIcon }).addTo(map);
+            el.addEventListener('click', () => {
+              popup.addTo(map);
+              marker.setPopup(popup);
+              popup.addTo(map);
+            });
           }
         );
       } else {
         setUserPosition(appData.defaultMapCenter);
         
-        const userIcon = L.divIcon({
-          html: '<div class="user-location-marker"></div>',
-          className: 'custom-div-icon',
-          iconSize: [20, 20],
-          iconAnchor: [10, 10]
+        const el = createUserLocationMarker(appData.defaultMapCenter);
+        const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([appData.defaultMapCenter[1], appData.defaultMapCenter[0]])
+          .addTo(map);
+        
+        const popup = new mapboxgl.Popup({ 
+          offset: 25,
+          className: 'custom-popup',
+          closeButton: false
+        })
+          .setHTML(`
+            <div style="padding: 8px;">
+              <h3 style="color: #e2e8f0; font-weight: bold; margin-bottom: 8px; font-size: 16px;">📍 Default Location</h3>
+              <div style="margin-bottom: 6px;">
+                <strong style="color: #f59e0b;">⚠️ Caution Zone:</strong>
+                <span style="color: #e2e8f0; font-size: 13px;"> 100m radius</span>
+              </div>
+              <div style="margin-bottom: 6px;">
+                <strong style="color: #ef4444;">🚨 High Risk Zone:</strong>
+                <span style="color: #e2e8f0; font-size: 13px;"> 60m radius</span>
+              </div>
+              <p style="color: #94a3b8; font-size: 12px; margin-top: 8px; margin-bottom: 0;">
+                Geolocation not supported
+              </p>
+            </div>
+          `);
+        
+        el.addEventListener('mouseenter', () => {
+          popup.addTo(map);
+          marker.setPopup(popup);
+          popup.addTo(map);
         });
         
-        L.marker(appData.defaultMapCenter, { icon: userIcon }).addTo(map);
+        el.addEventListener('click', () => {
+          popup.addTo(map);
+          marker.setPopup(popup);
+          popup.addTo(map);
+        });
       }
     }
 
@@ -290,7 +586,10 @@ const MapView = () => {
 
   const centerOnUser = () => {
     if (userPosition && mapInstanceRef.current) {
-      mapInstanceRef.current.setView(userPosition, 16);
+      mapInstanceRef.current.flyTo({
+        center: [userPosition[1], userPosition[0]],
+        zoom: 16
+      });
     }
   };
 
